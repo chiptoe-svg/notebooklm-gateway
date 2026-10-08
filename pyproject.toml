@@ -1,0 +1,27 @@
+[project]
+name = "notebooklm-gateway"
+version = "0.1.0"
+description = "Narrow MCP gateway: caller-supplied sources -> NotebookLM podcasts and reports"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "notebooklm-py[headless]==0.8.4",
+  "mcp>=2.3,<3",
+  "starlette",
+  "uvicorn",
+  "httpx",
+]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nlm_gateway"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

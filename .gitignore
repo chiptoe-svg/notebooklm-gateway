@@ -1,0 +1,29 @@
+.venv
+__pycache__/
+*.pyc
+*.log
+
+# Local credentials and runtime state — never commit
+.env
+.env.local
+.env.bak
+state/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local agent/worktree state
+.claude/
+
+# Derived code index
+.codegraph/
+
+# per-project progress dashboard view (durable record is STATE.md / docs/ROADMAP.md)
+.dashboard/
+
+# SDD scratch
+.superpowers/
+
+.superpowers/
