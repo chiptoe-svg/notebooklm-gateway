@@ -112,3 +112,30 @@ def test_existing_db_without_title_column_is_migrated(tmp_path):
     s.update_job("old", T0, title="Lighthouses")
     assert s.get_job("old").title == "Lighthouses"
     Store(path)  # reopening an already-migrated db is a no-op
+
+
+def test_existing_db_without_failed_indices_is_migrated(tmp_path):
+    import sqlite3
+    from nlm_gateway.store import Store
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.executescript("""CREATE TABLE jobs (
+      id TEXT PRIMARY KEY, consumer_id TEXT NOT NULL, kind TEXT NOT NULL, params TEXT NOT NULL,
+      status TEXT NOT NULL, error_code TEXT, error_message TEXT,
+      notebook_id TEXT, notebook_title TEXT, notebook_url TEXT,
+      urls TEXT NOT NULL DEFAULT '[]', upload_ids TEXT NOT NULL DEFAULT '[]', source_ids TEXT NOT NULL DEFAULT '[]',
+      planned_sources INTEGER NOT NULL DEFAULT 0,
+      task_id TEXT, artifact_id TEXT, accepted INTEGER NOT NULL DEFAULT 0,
+      size_bytes INTEGER, mime TEXT, text TEXT,
+      rollback_pending INTEGER NOT NULL DEFAULT 0, generation_requested INTEGER NOT NULL DEFAULT 0,
+      rollback_attempts INTEGER NOT NULL DEFAULT 0, title TEXT,
+      created_at REAL NOT NULL, updated_at REAL NOT NULL, finished_at REAL);
+    INSERT INTO jobs (id, consumer_id, kind, params, status, created_at, updated_at)
+      VALUES ('old', 'a', 'report', '{}', 'done', 1, 1);""")
+    db.commit()
+    db.close()
+    s = Store(path)
+    assert s.get_job("old").failed_indices == []
+    s.update_job("old", T0, failed_indices=[1, 3])
+    assert s.get_job("old").failed_indices == [1, 3]
+    Store(path)  # reopening an already-migrated db is a no-op

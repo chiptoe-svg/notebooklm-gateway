@@ -411,3 +411,48 @@ async def test_source_text_route_cleans_up_on_audit_failure(server):
     assert httpx.get(url, headers=auth(server["notes"])).status_code == 500
     tmp = gw.cfg.state_dir / "tmp"
     assert not tmp.exists() or list(tmp.iterdir()) == []
+
+
+async def test_add_sources_over_real_mcp_client(server):
+    gw, base = server["gw"], server["base"]
+    tok = gw.registry.pair("adder", ["add"], "To Review", 0, 0)
+    up = httpx.put(f"{base}/uploads", params={"filename": "paper.pdf"}, content=PDF, headers=auth(tok)).json()
+    async with mcp_client(f"{base}/mcp", tok) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            names = [t.name for t in (await s.list_tools()).tools]
+            assert names == COMMON + ["add_sources"]
+            t0 = time.monotonic()
+            res = await s.call_tool("add_sources", {"urls": ["https://a.example/x"], "upload_ids": [up["upload_id"]]})
+            assert time.monotonic() - t0 < 60 and not res.is_error, res
+            job = json.loads(res.content[0].text)
+            assert job["status"] == "queued" and job["notebook_url"].startswith("https://notebooklm.example/notebook/")
+            for _ in range(100):
+                st = json.loads((await s.call_tool("job_status", {"job_id": job["job_id"]})).content[0].text)
+                if st["status"] in ("done", "failed"):
+                    break
+                await asyncio.sleep(0.1)
+            assert st["status"] == "done" and st["added"] == 2 and st["failed"] == [] and "download_url" not in st, st
+            link = await s.call_tool("share_link", {"job_id": job["job_id"]})
+            assert link.is_error and json.loads(link.content[0].text)["code"] == "bad_request"
+    assert gw.nlm.client.generated == []
+    dl = f"{base}/jobs/{job['job_id']}/download"
+    assert httpx.get(dl, headers=auth(tok)).status_code == 404
+    assert httpx.head(dl, headers=auth(tok)).status_code == 404
+    # without the add scope the tool is hidden and refused
+    async with mcp_client(f"{base}/mcp", server["full"]) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            assert "add_sources" not in [t.name for t in (await s.list_tools()).tools]
+            res = await s.call_tool("add_sources", {"urls": ["https://x.example/"]})
+            assert res.is_error and json.loads(res.content[0].text)["code"] == "not_found"
+
+
+async def test_pending_upload_cap_is_configurable(server):
+    from dataclasses import replace
+    gw, base, tok = server["gw"], server["base"], server["full"]
+    gw.cfg = replace(gw.cfg, max_pending_uploads=3)
+    for _ in range(3):
+        assert httpx.put(f"{base}/uploads", params={"filename": "a.pdf"}, content=PDF, headers=auth(tok)).status_code == 200
+    r = httpx.put(f"{base}/uploads", params={"filename": "a.pdf"}, content=PDF, headers=auth(tok))
+    assert r.status_code == 429 and r.json()["message"].endswith("(max 3)")

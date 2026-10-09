@@ -18,7 +18,7 @@ PODCAST_FORMATS = ("deep_dive", "brief", "critique", "debate")
 PODCAST_LENGTHS = ("short", "default", "long")
 REPORT_KINDS = ("briefing", "study_guide", "blog")
 SLIDE_FORMATS = ("pdf", "pptx")
-KIND_SCOPE = {"podcast": "podcast", "report": "report", "slides": "studio", "infographic": "studio"}
+KIND_SCOPE = {"podcast": "podcast", "report": "report", "slides": "studio", "infographic": "studio", "sources": "add"}
 LIST_TIMEOUT_S = 50  # keeps list_notebooks inside the 60 s tool budget
 READ_TIMEOUT_S = 50  # whole-call bound for the synchronous read/notes tools (60 s tool budget)
 ASK_TIMEOUT_S = 50  # whole-call bound for ask_notebook
@@ -69,7 +69,7 @@ def _free_text(s: str) -> str | None:
     return s
 
 
-def _common(args, cfg) -> tuple[list[str], list[str], str, str | None]:
+def _sources(args, cfg) -> tuple[list[str], list[str]]:
     urls, upload_ids = _str_list(args, "urls"), _str_list(args, "upload_ids")
     if not urls and not upload_ids:
         raise _bad("provide at least one of urls or upload_ids")
@@ -78,6 +78,11 @@ def _common(args, cfg) -> tuple[list[str], list[str], str, str | None]:
     for i, u in enumerate(urls):
         if not re.match(r"^https?://", u) or len(u) > 2048:
             raise _bad(f"urls[{i}] must be an http(s) URL under 2048 characters")
+    return urls, upload_ids
+
+
+def _common(args, cfg) -> tuple[list[str], list[str], str, str | None]:
+    urls, upload_ids = _sources(args, cfg)
     language = args.get("language") or "en"
     if not isinstance(language, str) or not _LANG.match(language):
         raise _bad("language must be a code like en, es, pt-BR")
@@ -97,8 +102,12 @@ async def _share_url(client, notebook_id: str) -> str:
 async def submit(gw, consumer, kind: str, args: dict) -> dict:
     if KIND_SCOPE[kind] not in consumer.scopes:
         raise GatewayError("not_found", "unknown tool")
-    urls, upload_ids, language, instructions = _common(args, gw.cfg)
-    notebook, title = _name(args, "notebook"), _name(args, "title")
+    if kind == "sources":  # add only: no generation, no quota, no title
+        urls, upload_ids = _sources(args, gw.cfg)
+        notebook, params = _name(args, "notebook"), {}
+    else:
+        urls, upload_ids, language, instructions = _common(args, gw.cfg)
+        notebook, title = _name(args, "notebook"), _name(args, "title")
     if kind == "podcast":
         params = {"format": _enum(args, "format", PODCAST_FORMATS, "deep_dive"),
                   "length": _enum(args, "length", PODCAST_LENGTHS, "default"),
@@ -109,12 +118,13 @@ async def submit(gw, consumer, kind: str, args: dict) -> dict:
     elif kind == "slides":
         params = {"format": _enum(args, "format", SLIDE_FORMATS, "pdf"), "language": language,
                   "instructions": instructions, "title": title}
-    else:
+    elif kind == "infographic":
         params = {"language": language, "instructions": instructions, "title": title}
     gw.nlm.require()  # auth_expired before anything is recorded
     now = gw.now()
     # check + create_job + claim_uploads run with no await in between (atomic on the event loop)
-    quota.check(gw.store, gw.cfg, consumer, kind, now)
+    if kind != "sources":
+        quota.check(gw.store, gw.cfg, consumer, kind, now)
     job = gw.store.create_job(consumer.id, kind, params, urls, upload_ids, now)
     try:
         gw.store.claim_uploads(upload_ids, consumer.id, job.id, now)
@@ -132,8 +142,12 @@ async def submit(gw, consumer, kind: str, args: dict) -> dict:
         raise err from None
     gw.store.update_job(job.id, gw.now(), status="queued", notebook_id=nb_id, notebook_title=nb_title, notebook_url=url)
     gw.runner.wake()
-    gw.audit.write("submit", consumer=consumer.id, job_id=job.id, kind=kind, url_hashes=[digest(u) for u in urls],
-                   uploads=len(upload_ids), notebook_id=nb_id)
+    if kind == "sources":
+        gw.audit.write("submit", consumer=consumer.id, job_id=job.id, kind=kind, urls=len(urls),
+                       uploads=len(upload_ids), notebook_id=nb_id)
+    else:
+        gw.audit.write("submit", consumer=consumer.id, job_id=job.id, kind=kind, url_hashes=[digest(u) for u in urls],
+                       uploads=len(upload_ids), notebook_id=nb_id)
     return {"job_id": job.id, "notebook_url": url, "status": "queued"}
 
 
@@ -153,6 +167,10 @@ async def infographic_from_sources(gw, consumer, args):
     return await submit(gw, consumer, "infographic", args)
 
 
+async def add_sources(gw, consumer, args):
+    return await submit(gw, consumer, "sources", args)
+
+
 def _own_job(gw, consumer, args):
     job_id = args.get("job_id")
     job = gw.store.get_job(job_id, consumer.id) if isinstance(job_id, str) else None
@@ -163,8 +181,14 @@ def _own_job(gw, consumer, args):
 
 async def job_status(gw, consumer, args):
     job = _own_job(gw, consumer, args)
-    out = {"job_id": job.id, "kind": job.kind, "status": "queued" if job.status in ("new", "queued") else job.status,
-           "notebook_url": job.notebook_url, "title": job.title}
+    st = "queued" if job.status in ("new", "queued") else job.status
+    if job.kind == "sources":  # nothing to download: progress counts only
+        out = {"job_id": job.id, "kind": job.kind, "status": st, "notebook_url": job.notebook_url,
+               "added": len(job.source_ids), "failed": list(job.failed_indices)}
+        if job.status == "failed":
+            out["error"] = {"code": job.error_code, "message": job.error_message}
+        return out
+    out = {"job_id": job.id, "kind": job.kind, "status": st, "notebook_url": job.notebook_url, "title": job.title}
     if job.status == "failed":
         out["error"] = {"code": job.error_code, "message": job.error_message}
     if job.status == "done":
@@ -182,6 +206,8 @@ async def quota_status(gw, consumer, args):
 
 async def share_link(gw, consumer, args):
     job = _own_job(gw, consumer, args)
+    if job.kind == "sources":
+        raise _bad("an add_sources job has nothing to download")
     if job.status != "done":
         raise _bad("the job is not done yet; call job_status first")
     ttl = args.get("ttl_hours", gw.cfg.link_ttl_default_h)
@@ -484,4 +510,15 @@ TOOLS = [
              {"type": "object", "properties": {"notebook": _NOTEBOOK_EXISTING,
                  "source_title": {"type": "string", "minLength": 1, "maxLength": LOOKUP_MAX, "description": "Exact source title."}},
               "required": ["notebook", "source_title"]}, get_source_text),
+    ToolSpec("add_sources", "add",
+             "Add links (web pages, YouTube, PDFs) and uploaded files as sources to the user's NotebookLM notebook WITHOUT "
+             "generating anything: no podcast, report, slides or infographic, and no generation quota is used. Use it to "
+             "save, collect, import or file material into a notebook for later reading or questions. The notebook is the one "
+             "named in `notebook` (exact title; created if it does not exist), default the user's \"To Review\". Upload files "
+             "first with curl -T <file> \"{base}/uploads?filename=<name>\" and pass the returned upload_ids. Returns immediately "
+             "with job_id and notebook_url (reply with notebook_url). For many sources check job_status later: it reports "
+             "added (count) and failed (indices, urls first then upload_ids). A source that fails does not stop the others, "
+             "and sources already added are never removed.",
+             {"type": "object", "properties": {"urls": _SOURCES["urls"], "upload_ids": _SOURCES["upload_ids"],
+                                               "notebook": _SOURCES["notebook"]}}, add_sources),
 ]

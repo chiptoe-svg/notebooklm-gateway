@@ -2,6 +2,7 @@
 
 Invariant: a job's sources are removed from its notebook iff the job fails
 before Google accepted generation; earlier jobs' sources are never touched.
+Jobs of kind "sources" (add_sources) never generate and never remove anything.
 """
 from __future__ import annotations
 
@@ -91,6 +92,8 @@ class JobRunner:
 
     # -- the state machine -------------------------------------------------
     async def run_job(self, job) -> None:
+        if job.kind == "sources":
+            return await self._run_sources(job)
         requested = False
         self._active.add(job.id)
         try:
@@ -128,6 +131,67 @@ class JobRunner:
             await self._fail(job.id, classify(e), rollback=not requested)
         finally:
             self._active.discard(job.id)
+
+    async def _run_sources(self, job) -> None:
+        """Add every source, recording failures by index and continuing; auth/rate trouble aborts the rest.
+        Nothing is ever deleted: added sources stay, whatever happens."""
+        added, failed = list(job.source_ids), list(job.failed_indices)
+        err: GatewayError | None = None
+        self._active.add(job.id)
+        try:
+            client = self.nlm.require()
+            ups = {u.id: u for u in self.store.uploads_for_job(job.id)}
+            items = [(i, url, None) for i, url in enumerate(job.urls)]
+            items += [(len(job.urls) + j, None, ups.get(uid)) for j, uid in enumerate(job.upload_ids)]
+            for i, url, up in items:
+                if url is None and up is None:
+                    continue  # upload no longer on disk (should not happen); not counted either way
+                try:
+                    if url is not None:
+                        src = await client.sources.add_url(job.notebook_id, url, wait=True, wait_timeout=300)
+                    else:
+                        src = await client.sources.add_file(job.notebook_id, Path(up.path), wait=True, wait_timeout=600,
+                                                            title=up.filename)
+                except Exception as e:
+                    g = self._source_error(e, i)
+                    if g.code != "source_rejected":
+                        err = g
+                        break
+                    failed.append(i)
+                    self.store.update_job(job.id, time.time(), failed_indices=failed)
+                else:
+                    added.append(src.id)
+                    self.store.update_job(job.id, time.time(), source_ids=added)
+                if up is not None:
+                    self._drop_upload(up)
+            if err is None and not added:
+                err = GatewayError("source_rejected", "None of the sources could be added.")
+        except asyncio.CancelledError:
+            raise  # left running; recover() ends it without removing anything
+        except Exception as e:
+            err = classify(e)
+        finally:
+            self._active.discard(job.id)
+        self._end_sources(job.id, err)
+
+    def _end_sources(self, job_id: str, err: GatewayError | None) -> None:
+        """Finish a "sources" job: keep every added source, release the slots of the rest, drop leftover uploads."""
+        job = self.store.get_job(job_id)
+        if job is None or job.status in ("failed", "done"):
+            return
+        now = time.time()
+        fields = {"status": "done"} if err is None else {"status": "failed", "error_code": err.code, "error_message": err.message}
+        self.store.update_job(job_id, now, urls=[], finished_at=now, **fields)
+        if job.notebook_title:
+            self.notebooks.release(job.notebook_title, job.planned_sources - len(job.source_ids))
+        for up in self.store.uploads_for_job(job_id):
+            self._drop_upload(up)
+        counts = {"kind": job.kind, "notebook_id": job.notebook_id, "added": len(job.source_ids),
+                  "failed": len(job.failed_indices)}
+        if err is None:
+            self.audit.write("job_done", consumer=job.consumer_id, job_id=job_id, **counts)
+        else:
+            self.audit.write("job_failed", consumer=job.consumer_id, job_id=job_id, code=err.code, **counts)
 
     @staticmethod
     def _transient(exc: BaseException) -> bool:
@@ -220,6 +284,7 @@ class JobRunner:
         job = self.store.get_job(job_id)
         if job is None or job.status in ("failed", "done"):
             return
+        rollback = rollback and job.kind != "sources"  # add-only jobs never remove anything
         remaining: list[str] = []
         if not job.accepted and rollback:
             remaining = await self._delete_sources(job.notebook_id, list(job.source_ids))
@@ -257,6 +322,8 @@ class JobRunner:
 
     async def retry_rollbacks(self) -> None:
         for job in self.store.jobs_pending_rollback():
+            if job.kind == "sources":  # never set for add-only jobs; never act on it if it were
+                continue
             try:
                 remaining = await self._delete_sources(job.notebook_id, list(job.source_ids))
                 done = len(job.source_ids) - len(remaining)
@@ -288,7 +355,10 @@ class JobRunner:
             self.audit.write("job_failed", consumer=job.consumer_id, job_id=job.id, kind=job.kind, code="gateway_restarted",
                              accepted=False, rolled_back=0, rollback_pending=0)
         for job in self.store.jobs_with_status("running"):
-            if job.accepted and job.task_id:
+            if job.kind == "sources":  # keep what was added; release the rest
+                self._end_sources(job.id, GatewayError(
+                    "gateway_restarted", "The gateway restarted while adding sources; the ones already added were kept."))
+            elif job.accepted and job.task_id:
                 self._spawn_reattach(job.id)
             else:
                 await self._fail(job.id, GatewayError("gateway_restarted", "The gateway restarted before generation started; please resubmit."),

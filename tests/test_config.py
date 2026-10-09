@@ -44,3 +44,9 @@ def test_account_caps_defaults_and_env(tmp_path):
     cfg = load_config(env={**BASE, "NLM_STATE_DIR": str(tmp_path), "NLM_ACCOUNT_CHAT_DAILY": "5", "NLM_ACCOUNT_REPORT_DAILY": "6",
                            "NLM_ACCOUNT_SLIDES_DAILY": "7", "NLM_ACCOUNT_INFOGRAPHIC_DAILY": "8"})
     assert (cfg.account_chat_daily, cfg.account_report_daily, cfg.account_slides_daily, cfg.account_infographic_daily) == (5, 6, 7, 8)
+
+
+def test_max_pending_uploads(tmp_path):
+    assert load_config(env={**BASE, "NLM_STATE_DIR": str(tmp_path)}).max_pending_uploads == 10
+    cfg = load_config(env={**BASE, "NLM_STATE_DIR": str(tmp_path), "NLM_MAX_PENDING_UPLOADS": "100"})
+    assert cfg.max_pending_uploads == 100

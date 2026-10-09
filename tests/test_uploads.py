@@ -112,3 +112,13 @@ async def test_type_error_does_not_echo_filename(cfg, store, make_consumer):
     r = await put(app_for(cfg, store, make_consumer()), "secretname.exe", b"MZ")
     assert r.status_code == 400
     assert "secretname" not in r.text and ".exe" not in r.text
+
+
+async def test_pending_cap_from_config(cfg, store, make_consumer):
+    from dataclasses import replace
+    app = app_for(replace(cfg, max_pending_uploads=3), store, make_consumer())
+    for _ in range(3):
+        assert (await put(app, "a.pdf", PDF)).status_code == 200
+    r = await put(app, "a.pdf", PDF)
+    assert r.status_code == 400 and r.json()["message"].endswith("(max 3)")
+    assert len(list((cfg.state_dir / "uploads").iterdir())) == 3

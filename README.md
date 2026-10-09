@@ -1,6 +1,6 @@
 # notebooklm-gateway
 
-A narrow, token-authenticated MCP gateway that lets AI agents (Claude Code, Codex, [NanoClaw](https://github.com/qwibitai/nanoclaw) groups, any MCP client) turn sources (URLs, uploaded files) into a NotebookLM **audio podcast**, **written report**, **slide deck** or **infographic**, and (per scope) list sources, ask questions of a notebook, and read or add notes. One Python process holds one long-lived `NotebookLMClient` (notebooklm-py 0.8.4, pinned) logged in as the operator's Google account via [notebooklm-py](https://github.com/teng-lin/notebooklm-py). Binds `127.0.0.1:8773`; every route lives under `/notebooklm/`.
+A narrow, token-authenticated MCP gateway that lets AI agents (Claude Code, Codex, [NanoClaw](https://github.com/qwibitai/nanoclaw) groups, any MCP client) turn sources (URLs, uploaded files) into a NotebookLM **audio podcast**, **written report**, **slide deck** or **infographic**, and (per scope) add sources to a notebook without generating anything, list sources, ask questions of a notebook, and read or add notes. One Python process holds one long-lived `NotebookLMClient` (notebooklm-py 0.8.4, pinned) logged in as the operator's Google account via [notebooklm-py](https://github.com/teng-lin/notebooklm-py). Binds `127.0.0.1:8773`; every route lives under `/notebooklm/`.
 
 
 > **Read this first.**
@@ -8,9 +8,9 @@ A narrow, token-authenticated MCP gateway that lets AI agents (Claude Code, Code
 > - The host holds a **master token for the Google account** (`notebooklm login --master-token`): a durable, full-account credential that survives password changes until the device is removed in Google Account → Security. Upstream recommends a dedicated account. Run the gateway only on a machine you control, keep `~/.notebooklm/` and `state/` private, and expose it only behind TLS.
 > - Agents never see the Google credential; they get narrow tools and a per-consumer bearer token you can revoke at any time.
 
-## MCP tools (13)
+## MCP tools (14)
 
-`podcast_from_sources`, `report_from_sources`, `job_status`, `quota_status`, `share_link`, `list_notebooks`, `slides_from_sources`, `infographic_from_sources`, `list_sources`, `ask_notebook`, `read_note`, `create_note`, `get_source_text`. Podcast `format` is deep_dive|brief|critique|debate, `length` short|default|long; report `kind` is briefing|study_guide|blog; `language` defaults to `en`. Uploads go to a bearer-authed upload route, then are referenced by upload id (200 MB max, 2 h TTL).
+`podcast_from_sources`, `report_from_sources`, `job_status`, `quota_status`, `share_link`, `list_notebooks`, `slides_from_sources`, `infographic_from_sources`, `list_sources`, `ask_notebook`, `read_note`, `create_note`, `get_source_text`, `add_sources`. Podcast `format` is deep_dive|brief|critique|debate, `length` short|default|long; report `kind` is briefing|study_guide|blog; `language` defaults to `en`. Uploads go to a bearer-authed upload route, then are referenced by upload id (200 MB max, 2 h TTL).
 
 Both generation tools take an optional `notebook` (exact notebook title, 1-100 printable characters) and an optional `title` (1-100 printable characters) for the result; invalid values return `bad_request` without echoing the value.
 
@@ -26,12 +26,23 @@ Both generation tools take an optional `notebook` (exact notebook title, 1-100 p
 | `read` | `list_sources`, `ask_notebook` |
 | `studio` | `slides_from_sources`, `infographic_from_sources` |
 | `notes` | `read_note`, `create_note`, `get_source_text` |
+| `add` | `add_sources` |
 
 `job_status`, `quota_status` and `share_link` are always visible. A tool outside the consumer's scopes is hidden from `tools/list` and refused as `not_found`.
 
 ### Studio tools (`studio`)
 
 `slides_from_sources` (`format` pdf|pptx, default pdf) and `infographic_from_sources` (PNG) take the same `urls`, `upload_ids`, `notebook`, `title`, `instructions`, `language` as the podcast tool and run as the same kind of job (queued → running → done/failed, same rollback rules, `job_status`, `download_url`, `share_url` over 45 MB, rename to `title` or the default `"<first source title> · Slides|Infographic · <Mon D>"`). Downloads are `slides-<id>.pdf|.pptx` (`application/pdf`, `application/vnd.openxmlformats-officedocument.presentationml.presentation`) and `infographic-<id>.png` (`image/png`).
+
+### Adding sources only (`add`)
+
+`add_sources(urls?, upload_ids?, notebook?)` adds links and uploaded files to a notebook **without generating anything**: no podcast/report/slides/infographic quota is used and nothing is counted in `quota_status`. Same source rules as the generation tools (at least one, at most `NLM_NOTEBOOK_SOURCE_CAP` per call; upload first with `curl -T file "<base>/uploads?filename=<name>"`), and the same `notebook` rules (exact title, created if missing, default the consumer's notebook, overflow `"<name> (2)"`). It returns immediately with `{"job_id", "notebook_url", "status": "queued"}` and runs as job kind `sources`:
+
+- Each source is added in turn (urls first, then upload_ids). A source Google rejects is recorded as failed by its index and the job **continues** with the rest. `auth_expired` or `rate_limited` stop the remaining adds and fail the job with that code.
+- **No rollback, ever:** sources already added stay in the notebook whatever happens (failure, restart, rollback retries). Slots reserved for sources that were not added are released. Upload copies are deleted as soon as Google has the file, and also when its add failed or was not attempted.
+- `job_status` returns `{"job_id", "kind": "sources", "status", "notebook_url", "added": N, "failed": [indices], "error"?}` and no download fields. The job is `done` if at least one source was added and it was not stopped; otherwise `failed` (`source_rejected` when every add failed). After a restart a running add job fails as `gateway_restarted`, keeping what it added.
+- `share_link` and the download route refuse these jobs (`bad_request` / 404): there is nothing to download.
+- Audit: `submit` with kind, url count, upload count and notebook id; `job_done`/`job_failed` with added/failed counts. No URLs, filenames or titles.
 
 ### Read and notes tools
 
@@ -54,7 +65,7 @@ A job reserves quota, adds its sources to the named notebook, requests generatio
 - Rollback is per-source and retryable: undeleted sources stay on the job with `rollback_pending`, and the maintenance loop retries them when auth is ok. After 50 failed retries it stops (audit event `rollback_abandoned`, counts only); those sources stay in the notebook and keep their slots reserved.
 - On restart, jobs Google already accepted are re-attached and finish normally. If auth or the network is down at that point (or while an accepted job waits for its result), the job stays `running` and the maintenance loop re-attaches it once auth is back; only `generation_timeout` and `generation_failed` end an accepted job.
 - Only jobs whose generation was requested but not yet accepted fail as `gateway_restarted` on restart, without rolling back (Google may still be generating). Jobs interrupted while being submitted also fail as `gateway_restarted` and their uploads are released.
-- Each consumer may hold at most 10 unused, unexpired uploads; more return HTTP 429 (`bad_request`).
+- Each consumer may hold at most `NLM_MAX_PENDING_UPLOADS` (default 10) unused, unexpired uploads; more return HTTP 429 (`bad_request`).
 
 Error codes: `auth_expired`, `quota_exceeded`, `rate_limited`, `source_rejected`, `generation_timeout`, `generation_failed`, `upstream_changed`, `gateway_restarted`, `bad_request`, `not_found`.
 
@@ -88,6 +99,7 @@ Copy `.env.example` to `.env` (mode 600):
 | `NLM_ACCOUNT_INFOGRAPHIC_DAILY` | Account-wide infographics per 24 h (default 10) |
 | `NLM_ACCOUNT_CHAT_DAILY` | Account-wide `ask_notebook` questions per 24 h (default 480) |
 | `NLM_NOTEBOOK_SOURCE_CAP` | Sources per notebook (free 50, Pro 300) |
+| `NLM_MAX_PENDING_UPLOADS` | Unused, unexpired uploads per consumer (default 10); more return 429 |
 | `NLM_TIMEZONE` | Timezone for the date in default titles (default America/New_York) |
 | `NLM_STATE_DIR` | State directory (default `state`; credentials, never commit) |
 | `NLM_HOST` | Listen address (default 127.0.0.1; keep it loopback) |

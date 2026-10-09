@@ -20,7 +20,6 @@ _TEXT = frozenset({".txt", ".md", ".csv", ".tsv"})
 _FTYP = frozenset({".m4a", ".mp4"})
 ALLOWED_EXTS = frozenset(_MAGIC) | _TEXT | _FTYP
 _HEAD = 4096
-MAX_PENDING = 10  # unclaimed, unexpired uploads per consumer
 
 
 def safe_filename(raw: str) -> str:
@@ -53,8 +52,8 @@ async def receive_upload(request, cfg, store, consumer, now):
     ext = "." + name.rsplit(".", 1)[1].lower()
     if ext not in ALLOWED_EXTS:
         raise GatewayError("bad_request", f"file type not accepted; allowed: {', '.join(sorted(ALLOWED_EXTS))}")
-    if store.count_pending_uploads(consumer.id, now) >= MAX_PENDING:
-        raise TooManyUploads(MAX_PENDING)
+    if store.count_pending_uploads(consumer.id, now) >= cfg.max_pending_uploads:
+        raise TooManyUploads(cfg.max_pending_uploads)
     up_dir = cfg.state_dir / "uploads"
     up_dir.mkdir(mode=0o700, exist_ok=True)
     declared = request.headers.get("content-length")
@@ -77,8 +76,8 @@ async def receive_upload(request, cfg, store, consumer, now):
             raise GatewayError("bad_request", "empty upload")
         if not sniff_ok(ext, head):
             raise GatewayError("bad_request", f"file content does not look like {ext}")
-        if store.count_pending_uploads(consumer.id, now) >= MAX_PENDING:  # re-check: no await from here to the insert
-            raise TooManyUploads(MAX_PENDING)
+        if store.count_pending_uploads(consumer.id, now) >= cfg.max_pending_uploads:  # re-check: no await from here to the insert
+            raise TooManyUploads(cfg.max_pending_uploads)
         return store.add_upload(consumer.id, name, path, size, now, cfg.upload_ttl_s, upload_id=upload_id)
     except BaseException:
         path.unlink(missing_ok=True)

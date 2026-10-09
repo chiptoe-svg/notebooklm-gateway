@@ -43,6 +43,7 @@ class Config:
     account_report_daily: int = 95
     account_slides_daily: int = 10
     account_infographic_daily: int = 10
+    max_pending_uploads: int = 10  # unclaimed, unexpired uploads per consumer
 
     @property
     def account_audio_cap(self) -> int:
@@ -74,4 +75,5 @@ def load_config(env: Mapping[str, str] | None = None, env_file: Path | None = No
         account_report_daily=int(merged.get("NLM_ACCOUNT_REPORT_DAILY", "95")),
         account_slides_daily=int(merged.get("NLM_ACCOUNT_SLIDES_DAILY", "10")),
         account_infographic_daily=int(merged.get("NLM_ACCOUNT_INFOGRAPHIC_DAILY", "10")),
+        max_pending_uploads=int(merged.get("NLM_MAX_PENDING_UPLOADS", "10")),
     )

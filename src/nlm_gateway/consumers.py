@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCOPES = frozenset({"podcast", "report", "list", "read", "studio", "notes"})
+SCOPES = frozenset({"podcast", "report", "list", "read", "studio", "notes", "add"})
 TOKEN_PREFIX = "nlm_"
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 log = logging.getLogger("nlm_gateway.consumers")

@@ -6,7 +6,7 @@ import os
 import sqlite3
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import GatewayError
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   task_id TEXT, artifact_id TEXT, accepted INTEGER NOT NULL DEFAULT 0,
   size_bytes INTEGER, mime TEXT, text TEXT,
   rollback_pending INTEGER NOT NULL DEFAULT 0, generation_requested INTEGER NOT NULL DEFAULT 0,
-  rollback_attempts INTEGER NOT NULL DEFAULT 0, title TEXT,
+  rollback_attempts INTEGER NOT NULL DEFAULT 0, title TEXT, failed_indices TEXT NOT NULL DEFAULT '[]',
   created_at REAL NOT NULL, updated_at REAL NOT NULL, finished_at REAL);
 CREATE INDEX IF NOT EXISTS jobs_kind_created ON jobs(kind, created_at);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, created_at);
@@ -35,10 +35,10 @@ CREATE TABLE IF NOT EXISTS events (
   consumer_id TEXT NOT NULL, kind TEXT NOT NULL, created_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS events_kind_created ON events(kind, created_at);
 """
-_JSON = {"params", "urls", "upload_ids", "source_ids"}
+_JSON = {"params", "urls", "upload_ids", "source_ids", "failed_indices"}
 _UPDATABLE = {"status", "error_code", "error_message", "notebook_id", "notebook_title", "notebook_url", "urls",
               "source_ids", "task_id", "artifact_id", "accepted", "size_bytes", "mime", "text", "finished_at", "rollback_pending", "generation_requested",
-              "rollback_attempts", "title"}
+              "rollback_attempts", "title", "failed_indices"}
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,7 @@ class Job:
     generation_requested: bool
     rollback_attempts: int
     title: str | None = None
+    failed_indices: list = field(default_factory=list)  # kind "sources": indices that could not be added
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,8 @@ class Store:
             cols = {r[1] for r in self._db.execute("PRAGMA table_info(jobs)")}
             if "title" not in cols:  # databases created before logical titles
                 self._db.execute("ALTER TABLE jobs ADD COLUMN title TEXT")
+            if "failed_indices" not in cols:  # databases created before add_sources
+                self._db.execute("ALTER TABLE jobs ADD COLUMN failed_indices TEXT NOT NULL DEFAULT '[]'")
         if new:
             os.chmod(path, 0o600)
 

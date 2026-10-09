@@ -100,7 +100,7 @@ def create_app(gw):
 
     async def download(request):
         job = gw.store.get_job(request.path_params["job_id"], request.state.consumer.id)
-        if job is None or job.status != "done":
+        if job is None or job.status != "done" or job.kind == "sources":  # add_sources jobs have no file
             return JSONResponse({"code": "not_found", "message": "no such finished job"}, status_code=404)
         return await stream(request, job, "download")
 
